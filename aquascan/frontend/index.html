@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AquaScan AI</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<style>
+:root{--bg:#06202b;--panel:#0b3040;--ink:#e6f4f1;--dim:#8fb5b5;--line:#1c4a5c;--hot:#ff8a3d;--ok:#4fd1a5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:baseline}
+h1{margin:0;font:600 22px Georgia,serif}header span{color:var(--dim)}
+main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px}
+label{display:block;margin:8px 0 2px;color:var(--dim);font-size:13px}
+input{width:100%;padding:7px;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:4px}
+button{margin-top:12px;padding:9px 14px;border:0;border-radius:4px;background:var(--ok);color:#03221b;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5}button.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}
+:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+#map{height:340px;border-radius:6px;margin-bottom:12px}
+#wrap{overflow:auto;max-height:420px;background:#000;border-radius:6px}
+canvas{display:block;max-width:100%}
+table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
+td,th{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left}
+.bar{display:inline-block;height:8px;background:var(--hot);border-radius:4px}
+#msg{color:var(--hot);min-height:22px}
+</style></head><body>
+<header><h1>AquaScan AI</h1><span>Upload a side-scan sonar image. Get debris on a map.</span></header>
+<main>
+<section class="panel">
+ <label for="f">Sonar image (PNG/JPG)</label><input id="f" type="file" accept="image/*">
+ <label for="lat">Start latitude</label><input id="lat" type="number" step="any" value="20.3">
+ <label for="lon">Start longitude</label><input id="lon" type="number" step="any" value="86.7">
+ <label for="hd">Boat heading (° from north)</label><input id="hd" type="number" value="45">
+ <label for="sw">Swath width (m)</label><input id="sw" type="number" value="100">
+ <label for="ln">Survey length (m)</label><input id="ln" type="number" value="200">
+ <label for="mc">Minimum confidence: <b id="mcv">50</b>%</label><input id="mc" type="range" min="0" max="100" value="50">
+ <button id="go">Detect debris</button> <button id="dl" class="alt" disabled>Download report</button>
+ <p id="msg" role="status"></p>
+</section>
+<section>
+ <div id="map"></div>
+ <div id="wrap"><canvas id="cv" width="10" height="10"></canvas></div>
+ <div class="panel" style="margin-top:12px"><b id="sum">No results yet. Upload an image to start.</b>
+ <table id="tb"><thead><tr><th>#</th><th>Type</th><th>Confidence</th><th>Lat</th><th>Lon</th><th>Why</th></tr></thead><tbody></tbody></table></div>
+</section></main>
+<script>
+const API = window.API_BASE || "";           // set to your backend URL when frontend is on Vercel
+const $ = id => document.getElementById(id);
+const map = L.map("map").setView([20.3, 86.7], 12);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {attribution: "© OpenStreetMap"}).addTo(map);
+let layer = L.layerGroup().addTo(map), last = [];
+$("mc").oninput = () => $("mcv").textContent = $("mc").value;
+$("f").onchange = e => { const img = new Image(); img.onload = () => {
+  const c = $("cv"); c.width = img.width; c.height = img.height; c.getContext("2d").drawImage(img, 0, 0); };
+  if (e.target.files[0]) img.src = URL.createObjectURL(e.target.files[0]); };
+$("go").onclick = async () => {
+  const file = $("f").files[0]; if (!file) { $("msg").textContent = "Choose a sonar image first."; return; }
+  const fd = new FormData(); fd.append("file", file);
+  for (const [k, id] of [["lat0","lat"],["lon0","lon"],["heading","hd"],["swath_m","sw"],["length_m","ln"]]) fd.append(k, $(id).value);
+  fd.append("min_conf", $("mc").value / 100);
+  $("go").disabled = true; $("msg").textContent = "Analysing…";
+  try {
+    const r = await fetch(API + "/api/detect", {method: "POST", body: fd});
+    const j = await r.json(); if (!r.ok) throw new Error(j.detail || r.statusText);
+    last = j.detections; render(j);
+    $("msg").textContent = ""; $("dl").disabled = !last.length;
+  } catch (e) { $("msg").textContent = "Detection failed: " + e.message; }
+  $("go").disabled = false;
+};
+function render(j) {
+  const c = $("cv"), x = c.getContext("2d"); x.lineWidth = 2; x.font = "14px sans-serif";
+  layer.clearLayers(); const tb = $("tb").tBodies[0]; tb.innerHTML = "";
+  last.forEach((d, i) => {
+    const [a, b, e, f] = d.box, hot = d.label === "debris";
+    x.strokeStyle = x.fillStyle = hot ? "#ff8a3d" : "#4fd1a5"; x.strokeRect(a, b, e - a, f - b);
+    x.fillText(Math.round(d.confidence * 100) + "%", a, Math.max(12, b - 4));
+    L.circleMarker([d.lat, d.lon], {color: hot ? "#ff8a3d" : "#4fd1a5", radius: 8}).addTo(layer)
+      .bindPopup(`#${i+1} ${d.label}<br>${Math.round(d.confidence*100)}% confident`);
+    const tr = tb.insertRow(); [i+1, d.label, `<span class="bar" style="width:${d.confidence*60}px"></span> ${Math.round(d.confidence*100)}%`,
+      d.lat, d.lon, d.reason].forEach(v => tr.insertCell().innerHTML = v);
+  });
+  if (last.length) map.fitBounds(L.latLngBounds(last.map(d => [d.lat, d.lon])).pad(0.5), {maxZoom: 17});
+  $("sum").textContent = last.length ? `${last.length} object(s) found` : "Nothing above the confidence threshold. Lower it to see weaker detections.";
+}
+$("dl").onclick = () => {
+  const rows = [["id","label","confidence","lat","lon","reason"], ...last.map((d,i)=>[i+1,d.label,d.confidence,d.lat,d.lon,`"${d.reason}"`])];
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")], {type:"text/csv"}));
+  a.download = "aquascan_report.csv"; a.click();
+};
+</script></body></html>
